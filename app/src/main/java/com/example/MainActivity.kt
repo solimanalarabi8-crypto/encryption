@@ -168,39 +168,70 @@ fun ComposeScreen(vaultViewModel: VaultViewModel) {
                 }
 
                 Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(
-                        onClick = {
-                            if (password.isEmpty() || visibleText.isEmpty() || hiddenText.isEmpty()) {
-                                scope.launch { snackbarHostState.showSnackbar("All fields required") }
-                                return@Button
-                            }
-                            if (carrierType != "Text" && carrierUri == null) {
-                                scope.launch { snackbarHostState.showSnackbar("Please attach a file first") }
-                                return@Button
-                            }
-                            try {
-                                val encrypted = Crypto.encrypt(hiddenText, password)
-                                val finalPayload = StegoText.embed(visibleText, encrypted)
-                                vaultViewModel.saveMessage(visibleText, encrypted, isSent = true)
-                                
-                                val clipboardManager = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                                val clip = ClipData.newPlainText("VeilCrypt", finalPayload)
-                                clipboardManager.setPrimaryClip(clip)
-                                scope.launch { snackbarHostState.showSnackbar("Encrypted & Copied. Saved to Chat.") }
-                            } catch (e: Exception) {
-                                scope.launch { snackbarHostState.showSnackbar("Encryption failed: ${e.message}") }
-                            }
-                        },
-                        modifier = Modifier.weight(1f).height(56.dp),
-                        shape = RoundedCornerShape(16.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
-                    ) {
-                        Text("COPY & SAVE", fontSize = 14.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
+                    if (carrierType == "Text") {
+                        Button(
+                            onClick = {
+                                if (password.isEmpty() || visibleText.isEmpty() || hiddenText.isEmpty()) {
+                                    scope.launch { snackbarHostState.showSnackbar("All fields required") }
+                                    return@Button
+                                }
+                                try {
+                                    val encrypted = Crypto.encrypt(hiddenText, password)
+                                    val finalPayload = StegoText.embed(visibleText, encrypted)
+                                    vaultViewModel.saveMessage(visibleText, encrypted, isSent = true)
+                                    
+                                    val clipboardManager = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                    val clip = ClipData.newPlainText("VeilCrypt", finalPayload)
+                                    clipboardManager.setPrimaryClip(clip)
+                                    scope.launch { snackbarHostState.showSnackbar("Encrypted & Copied. Saved to Chat.") }
+                                } catch (e: Exception) {
+                                    scope.launch { snackbarHostState.showSnackbar("Encryption failed: ${e.message}") }
+                                }
+                            },
+                            modifier = Modifier.weight(1f).height(56.dp),
+                            shape = RoundedCornerShape(16.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                        ) {
+                            Text("COPY TEXT", fontSize = 14.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    } else {
+                        Button(
+                            onClick = {
+                                if (password.isEmpty() || carrierUri == null || hiddenText.isEmpty()) {
+                                    scope.launch { snackbarHostState.showSnackbar("All fields & file required") }
+                                    return@Button
+                                }
+                                scope.launch(Dispatchers.IO) {
+                                    try {
+                                        val encrypted = Crypto.encrypt(hiddenText, password)
+                                        val sharedUri = FileStego.embedInFile(context, carrierUri!!, encrypted)
+                                        withContext(Dispatchers.Main) {
+                                            vaultViewModel.saveMessage(carrierFileName ?: "File", encrypted, isSent = true)
+                                        }
+                                        val ext = context.contentResolver.getType(carrierUri!!)?.let { android.webkit.MimeTypeMap.getSingleton().getExtensionFromMimeType(it) } ?: "bin"
+                                        val fileName = "veiled_${System.currentTimeMillis()}.$ext"
+                                        FileStego.saveToDownloads(context, sharedUri, fileName)
+                                        withContext(Dispatchers.Main) {
+                                            snackbarHostState.showSnackbar("File saved to Downloads folder.")
+                                        }
+                                    } catch (e: Exception) {
+                                        withContext(Dispatchers.Main) {
+                                            snackbarHostState.showSnackbar("Failed: ${e.message}")
+                                        }
+                                    }
+                                }
+                            },
+                            modifier = Modifier.weight(1f).height(56.dp),
+                            shape = RoundedCornerShape(16.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                        ) {
+                            Text("SAVE FILE", fontSize = 14.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
                     }
                     
                     Button(
                         onClick = {
-                            if (password.isEmpty() || visibleText.isEmpty() || hiddenText.isEmpty()) {
+                            if (password.isEmpty() || (carrierType == "Text" && visibleText.isEmpty()) || hiddenText.isEmpty()) {
                                 scope.launch { snackbarHostState.showSnackbar("All fields required") }
                                 return@Button
                             }
@@ -910,6 +941,40 @@ object FileStego {
         tempFile.writeBytes(finalBytes)
         
         return androidx.core.content.FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", tempFile)
+    }
+
+    fun saveToDownloads(context: Context, sourceUri: android.net.Uri, fileName: String) {
+        val resolver = context.contentResolver
+        val contentValues = android.content.ContentValues().apply {
+            put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+            val mimeType = resolver.getType(sourceUri) ?: "application/octet-stream"
+            put(android.provider.MediaStore.MediaColumns.MIME_TYPE, mimeType)
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, android.os.Environment.DIRECTORY_DOWNLOADS)
+            }
+        }
+        
+        val uri = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+            resolver.insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, contentValues)
+        } else {
+            null
+        }
+        
+        if (uri != null) {
+            resolver.openOutputStream(uri)?.use { output ->
+                resolver.openInputStream(sourceUri)?.use { input ->
+                    input.copyTo(output)
+                }
+            }
+        } else {
+            val dir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)
+            val file = java.io.File(dir, fileName)
+            file.outputStream().use { output ->
+                resolver.openInputStream(sourceUri)?.use { input ->
+                    input.copyTo(output)
+                }
+            }
+        }
     }
 
     fun extractFromFile(context: Context, sourceUri: android.net.Uri): String? {
